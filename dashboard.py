@@ -10,118 +10,93 @@ data = pd.read_pickle(file_path)
 # Extract relevant DataFrames
 order_items_df = data["order_items_df"]
 order_payments_df = data["order_payments_df"]
-customers_df = data["customers_df"]
 products_df = data["products_df"]
 
-# Merge product data
-product_sales = order_items_df.groupby("product_id").agg({"price": "sum", "order_id": "count"}).reset_index()
-product_sales.rename(columns={"price": "total_revenue", "order_id": "total_sold"}, inplace=True)
-product_sales = product_sales.merge(products_df, on="product_id", how="left")
+# Convert dates to datetime format
+order_items_df["shipping_limit_date"] = pd.to_datetime(order_items_df["shipping_limit_date"])
+order_payments_df = order_payments_df.merge(order_items_df[['order_id', 'shipping_limit_date']], on='order_id', how='left')
 
+# Filter out empty months
+excluded_dates = {"2020-04", "2020-02", "2016-09", "2016-12"}
+date_counts = order_items_df['shipping_limit_date'].dt.to_period("M").value_counts()
+available_dates = [date for date in date_counts[date_counts > 0].index.astype(str).tolist() if date not in excluded_dates]
 
 # Streamlit app
 st.set_page_config(page_title="E-Commerce Dashboard", layout="wide")
 
-# Sidebar Navigation
+# Sidebar
 st.sidebar.image("logo.png", width=150)
-st.sidebar.title("Navigation")
-menu = st.sidebar.radio("Go to", ["Overview", "Sales Analysis", "Payment Methods", "Customer Distribution"])
+st.sidebar.title("Filters")
 
-# Filter by date range
-st.sidebar.subheader("Filter by Date Range")
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime(order_items_df['shipping_limit_date']).min())
-end_date = st.sidebar.date_input("End Date", pd.to_datetime(order_items_df['shipping_limit_date']).max())
-filtered_orders = order_items_df[(order_items_df['shipping_limit_date'] >= str(start_date)) & (order_items_df['shipping_limit_date'] <= str(end_date))]
+# Select Month & Year
+if available_dates:
+    selected_date = st.sidebar.selectbox("Select Month & Year", sorted(available_dates, reverse=True))
+    
+    # Filter data based on selected month & year
+    filtered_orders = order_items_df[order_items_df['shipping_limit_date'].dt.to_period("M").astype(str) == selected_date]
+    filtered_payments = order_payments_df[order_payments_df['shipping_limit_date'].dt.to_period("M").astype(str) == selected_date]
+else:
+    filtered_orders = pd.DataFrame()
+    filtered_payments = pd.DataFrame()
+    st.sidebar.warning("No available data.")
 
 st.title("📊 E-Commerce Dashboard")
 st.markdown("---")
 
-if menu == "Overview":
-    st.header("📊 Overview of E-Commerce Data")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Orders", filtered_orders.shape[0])
-    col2.metric("Unique Products", products_df['product_id'].nunique())
-    col3.metric("Total Revenue", f"${filtered_orders['price'].sum():,.2f}")
+# Interactive Revenue Over Time
+st.header("📊 Revenue Over Time")
+if not filtered_orders.empty:
+    revenue_over_time = filtered_orders.groupby(filtered_orders['shipping_limit_date'].dt.to_period("D")).agg({"price": "sum"}).reset_index()
+    revenue_over_time['shipping_limit_date'] = revenue_over_time['shipping_limit_date'].astype(str)
     
-    st.subheader("Data Summary")
-    st.write(filtered_orders.describe())
-    
-    if st.checkbox("Show Raw Data"):
-        st.write(filtered_orders)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.lineplot(x=revenue_over_time['shipping_limit_date'], y=revenue_over_time['price'], marker='o', color='b')
+    ax.set_title("Daily Revenue Trend for Selected Month")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Total Revenue")
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
+else:
+    st.warning("No revenue data available for the selected month.")
 
-elif menu == "Sales Analysis":
-    st.header("📈 Sales Analysis")
-    most_popular = product_sales.nlargest(10, "total_sold")
-    least_popular = product_sales.nsmallest(10, "total_sold")
+# Interactive Sales by Category
+st.header("📦 Sales by Category")
+if not filtered_orders.empty:
+    category_sales = filtered_orders.merge(products_df, on="product_id", how="left")
+    category_summary = category_sales.groupby("product_category_name").agg({"price": "sum"}).reset_index()
+    category_summary = category_summary.sort_values(by="price", ascending=False).head(15)
     
-    fig, ax = plt.subplots(1, 2, figsize=(18, 6), gridspec_kw={'wspace': 0.4})
-    sns.barplot(y=most_popular["product_category_name"], x=most_popular["total_sold"], ax=ax[0], palette="Blues")
-    ax[0].set_title("Top 10 Best-Selling Products")
-    ax[0].set_xlabel("Total Sold")
-    ax[0].set_ylabel("Product Category")
+    fig, ax = plt.subplots(figsize=(12, 8))
+    sns.barplot(y=category_summary["product_category_name"], x=category_summary["price"], palette="Blues")
+    ax.set_title("Top 15 Sales by Product Category")
+    ax.set_xlabel("Total Revenue")
+    ax.set_ylabel("Product Category")
+    plt.xticks(rotation=45, ha="right")
+    st.pyplot(fig)
+else:
+    st.warning("No sales data available for the selected month.")
+
+# Interactive Payment Distribution
+st.header("💳 Payment Methods Distribution")
+if not filtered_payments.empty:
+    payment_counts = filtered_payments["payment_type"].value_counts()
+    fig, ax = plt.subplots(figsize=(8, 8))
+    colors = ["#1E3A8A", "#3B82F6", "#60A5FA", "#93C5FD", "#BFDBFE"]
+    wedges, _, autotexts = ax.pie(payment_counts.values, autopct='%1.1f%%', colors=colors, startangle=140, wedgeprops= {'edgecolor': 'white', 'linewidth': 2})
     
-    sns.barplot(y=least_popular["product_category_name"], x=least_popular["total_sold"], ax=ax[1], palette="Reds")
-    ax[1].set_title("Top 10 Least-Selling Products")
-    ax[1].set_xlabel("Total Sold")
-    ax[1].set_ylabel("Product Category")
+    for text in autotexts:
+        text.set_fontsize(12)
     
+    # Convert to donut chart
+    centre_circle = plt.Circle((0,0),0.70,fc='white')
+    fig.gca().add_artist(centre_circle)
+    
+    ax.set_title("Payment Methods Distribution")
     st.pyplot(fig)
     
-    # Top Profitable Products
-    top_profitable = product_sales.nlargest(10, "total_revenue")
-    st.subheader("🏆 Top 10 Most Profitable Products")
-    st.write(top_profitable[["product_category_name", "total_revenue"]])
+    # Display legend below chart
+    legend_labels = "".join([f"<div style='display: flex; align-items: center;'><span style='width: 12px; height: 12px; background-color:{colors[i]}; display: inline-block; margin-right: 5px;'></span>{ptype}: {pcount} ({pcount / payment_counts.sum() * 100:.1f}%)</div>" for i, (ptype, pcount) in enumerate(zip(payment_counts.index, payment_counts.values))])
     
-    if st.button("Download Sales Data"):
-        csv = product_sales.to_csv(index=False).encode('utf-8')
-        st.download_button("Download CSV", data=csv, file_name="sales_data.csv", mime='text/csv')
-
-elif menu == "Payment Methods":
-    st.header("💳 Payment Methods Distribution")
-    
-    # Menggunakan data yang sudah difilter berdasarkan rentang tanggal
-    filtered_payments = order_payments_df[order_payments_df['order_id'].isin(filtered_orders['order_id'])]
-
-    if not filtered_payments.empty:
-        payment_counts = filtered_payments["payment_type"].value_counts()
-
-        fig, ax = plt.subplots(figsize=(8, 6))
-        colors = sns.color_palette("Blues", len(payment_counts))
-        wedges, _, autotexts = ax.pie(
-            payment_counts.values, labels=None, 
-            autopct=lambda p: f'{p:.1f}%' if p > 0.1 else '', 
-            colors=colors, startangle=140, wedgeprops={'edgecolor': 'white'}
-        )
-        plt.setp(autotexts, size=10, weight="bold", color="white")
-        ax.set_title("Most Frequently Used Payment Methods")
-        ax.legend(payment_counts.index, title="Payment Methods", loc="lower center", bbox_to_anchor=(0.5, -0.1), ncol=2)
-        st.pyplot(fig)
-
-        # Menampilkan jumlah transaksi per metode pembayaran di bawah pie chart
-        st.subheader("📋 Payment Methods Breakdown")
-        st.write(payment_counts.reset_index().rename(columns={"index": "Payment Method", "payment_type": "Transaction Count"}))
-    else:
-        st.warning("No payment data available for the selected date range.")
-
-
-elif menu == "Customer Distribution":
-    st.header("🌍 Customer Distribution by Zip Code")
-    customer_distribution = customers_df["customer_zip_code_prefix"].value_counts().nlargest(10)
-    
-    fig, ax = plt.subplots(figsize=(10, 5))
-    sns.barplot(x=customer_distribution.index, y=customer_distribution.values, palette="coolwarm")
-    ax.set_title("Customer Distribution by Zip Code (Top 10)")
-    ax.set_xlabel("Zip Code")
-    ax.set_ylabel("Number of Customers")
-    st.pyplot(fig)
-    
-    search_zip = st.text_input("Search Customer by Zip Code")
-    if search_zip:
-        filtered_customers = customers_df[customers_df["customer_zip_code_prefix"].astype(str) == search_zip]
-        st.write(filtered_customers)
-    
-    # Top Customers
-    st.subheader("🏅 Top 10 Customers with Highest Orders")
-    top_customers = order_items_df["order_id"].value_counts().nlargest(10)
-    st.write(top_customers)
-
+    st.markdown(f"<div style='text-align: center;'>{legend_labels}</div>", unsafe_allow_html=True)
+else:
+    st.warning("No payment data available for the selected month.")
