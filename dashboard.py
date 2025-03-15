@@ -7,96 +7,133 @@ import seaborn as sns
 file_path = "all_dfs.pkl"
 data = pd.read_pickle(file_path)
 
-# Extract relevant DataFrames
 order_items_df = data["order_items_df"]
 order_payments_df = data["order_payments_df"]
 products_df = data["products_df"]
+orders_df = data["orders_df"]
+customers_df = data["customers_df"]
 
-# Convert dates to datetime format
+order_items_df = order_items_df.merge(products_df[['product_id', 'product_category_name']], on='product_id', how='left')
+order_items_df = order_items_df.merge(orders_df[['order_id', 'customer_id']], on='order_id', how='left')
+order_items_df = order_items_df.merge(customers_df[['customer_id', 'customer_zip_code_prefix']], on='customer_id', how='left')
 order_items_df["shipping_limit_date"] = pd.to_datetime(order_items_df["shipping_limit_date"])
-order_payments_df = order_payments_df.merge(order_items_df[['order_id', 'shipping_limit_date']], on='order_id', how='left')
 
-# Filter out empty months
-excluded_dates = {"2020-04", "2020-02", "2016-09", "2016-12"}
-date_counts = order_items_df['shipping_limit_date'].dt.to_period("M").value_counts()
-available_dates = [date for date in date_counts[date_counts > 0].index.astype(str).tolist() if date not in excluded_dates]
+order_payments_df = order_payments_df.merge(order_items_df[['order_id', 'shipping_limit_date', 'product_category_name']], on='order_id', how='left')
 
-# Streamlit app
+# Define seasons
+def get_season(date):
+    month = date.month
+    if month in [12, 1, 2]:
+        return "Winter"
+    elif month in [3, 4, 5]:
+        return "Spring"
+    elif month in [6, 7, 8]:
+        return "Summer"
+    else:
+        return "Fall"
+
+order_items_df["season"] = order_items_df["shipping_limit_date"].apply(get_season)
+order_payments_df["season"] = order_payments_df["shipping_limit_date"].apply(get_season)
+
 st.set_page_config(page_title="E-Commerce Dashboard", layout="wide")
 
-# Sidebar
 st.sidebar.image("logo.png", width=150)
 st.sidebar.title("Filters")
 
-# Select Month & Year
-if available_dates:
-    selected_date = st.sidebar.selectbox("Select Month & Year", sorted(available_dates, reverse=True))
-    
-    # Filter data based on selected month & year
-    filtered_orders = order_items_df[order_items_df['shipping_limit_date'].dt.to_period("M").astype(str) == selected_date]
-    filtered_payments = order_payments_df[order_payments_df['shipping_limit_date'].dt.to_period("M").astype(str) == selected_date]
-else:
-    filtered_orders = pd.DataFrame()
-    filtered_payments = pd.DataFrame()
-    st.sidebar.warning("No available data.")
+# Filter by Season
+selected_season = st.sidebar.selectbox("Select Season", ["All", "Winter", "Spring", "Summer", "Fall"])
 
-st.title("📊 E-Commerce Dashboard")
+# Filter by Product Category
+selected_category = st.sidebar.selectbox("Select Product Category", ["All"] + sorted(order_items_df["product_category_name"].dropna().unique().tolist()))
+
+if selected_season != "All":
+    filtered_orders = order_items_df[order_items_df['season'] == selected_season]
+else:
+    filtered_orders = order_items_df
+
+filtered_payments = order_payments_df.copy()
+if selected_season != "All":
+    filtered_payments = filtered_payments[filtered_payments['season'] == selected_season]
+
+if selected_category != "All":
+    filtered_payments = filtered_payments[filtered_payments["product_category_name"] == selected_category]
+
+st.title("E-Commerce Dashboard")
 st.markdown("---")
 
-# Interactive Revenue Over Time
-st.header("📊 Revenue Over Time")
+st.header("Top 10 Best Selling Products")
 if not filtered_orders.empty:
-    revenue_over_time = filtered_orders.groupby(filtered_orders['shipping_limit_date'].dt.to_period("D")).agg({"price": "sum"}).reset_index()
-    revenue_over_time['shipping_limit_date'] = revenue_over_time['shipping_limit_date'].astype(str)
+    product_sales = filtered_orders.groupby("product_id").agg({"order_id": "count"}).reset_index()
+    product_sales = product_sales.merge(products_df, on="product_id", how="left")
+    top_10_best = product_sales.sort_values(by="order_id", ascending=False).head(10)
     
     fig, ax = plt.subplots(figsize=(12, 6))
-    sns.lineplot(x=revenue_over_time['shipping_limit_date'], y=revenue_over_time['price'], marker='o', color='b')
-    ax.set_title("Daily Revenue Trend for Selected Month")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Total Revenue")
-    plt.xticks(rotation=45)
-    st.pyplot(fig)
-else:
-    st.warning("No revenue data available for the selected month.")
-
-# Interactive Sales by Category
-st.header("📦 Sales by Category")
-if not filtered_orders.empty:
-    category_sales = filtered_orders.merge(products_df, on="product_id", how="left")
-    category_summary = category_sales.groupby("product_category_name").agg({"price": "sum"}).reset_index()
-    category_summary = category_summary.sort_values(by="price", ascending=False).head(15)
-    
-    fig, ax = plt.subplots(figsize=(12, 8))
-    sns.barplot(y=category_summary["product_category_name"], x=category_summary["price"], palette="Blues")
-    ax.set_title("Top 15 Sales by Product Category")
-    ax.set_xlabel("Total Revenue")
+    sns.barplot(y=top_10_best["product_category_name"], x=top_10_best["order_id"], palette="Greens", errorbar=None)
+    ax.set_title("Top 10 Best Selling Products")
+    ax.set_xlabel("Units Sold")
     ax.set_ylabel("Product Category")
-    plt.xticks(rotation=45, ha="right")
     st.pyplot(fig)
 else:
-    st.warning("No sales data available for the selected month.")
+    st.warning("No data available for the selected season.")
 
-# Interactive Payment Distribution
-st.header("💳 Payment Methods Distribution")
+st.header("Top 10 Least Selling Products")
+if not filtered_orders.empty:
+    product_sales_least = filtered_orders.groupby("product_id").agg({"order_item_id": "count"}).reset_index()
+    product_sales_least = product_sales_least.merge(products_df, on="product_id", how="left")
+    top_10_least = product_sales_least.sort_values(by="order_item_id", ascending=True).head(10)
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.barplot(y=top_10_least["product_category_name"], x=top_10_least["order_item_id"], palette="Reds", errorbar=None)
+    ax.set_title("Top 10 Least Selling Products")
+    ax.set_xlabel("Units Sold")
+    ax.set_ylabel("Product Category")
+    st.pyplot(fig)
+else:
+    st.warning("No data available for the selected season.")
+
+st.header("Payment Methods Distribution")
 if not filtered_payments.empty:
     payment_counts = filtered_payments["payment_type"].value_counts()
+    payment_counts = payment_counts[(payment_counts > 0) & (payment_counts.index != "not_defined")]
+    
     fig, ax = plt.subplots(figsize=(8, 8))
     colors = ["#1E3A8A", "#3B82F6", "#60A5FA", "#93C5FD", "#BFDBFE"]
-    wedges, _, autotexts = ax.pie(payment_counts.values, autopct='%1.1f%%', colors=colors, startangle=140, wedgeprops= {'edgecolor': 'white', 'linewidth': 2})
+    wedges, _, autotexts = ax.pie(payment_counts.values, autopct=lambda p: f'{p:.1f}%' if p > 1 else '', colors=colors, startangle=140, wedgeprops={'edgecolor': 'white', 'linewidth': 2})
     
     for text in autotexts:
         text.set_fontsize(12)
     
-    # Convert to donut chart
     centre_circle = plt.Circle((0,0),0.70,fc='white')
     fig.gca().add_artist(centre_circle)
     
     ax.set_title("Payment Methods Distribution")
     st.pyplot(fig)
     
-    # Display legend below chart
     legend_labels = "".join([f"<div style='display: flex; align-items: center;'><span style='width: 12px; height: 12px; background-color:{colors[i]}; display: inline-block; margin-right: 5px;'></span>{ptype}: {pcount} ({pcount / payment_counts.sum() * 100:.1f}%)</div>" for i, (ptype, pcount) in enumerate(zip(payment_counts.index, payment_counts.values))])
     
     st.markdown(f"<div style='text-align: center;'>{legend_labels}</div>", unsafe_allow_html=True)
 else:
-    st.warning("No payment data available for the selected month.")
+    st.warning("No payment data available for the selected filters.")
+
+st.header("Customer Distribution by Zip Code (Top 10)")
+filtered_customers = order_items_df.copy()
+
+if selected_season != "All":
+    filtered_customers = filtered_customers[filtered_customers['season'] == selected_season]
+
+if selected_category != "All":
+    filtered_customers = filtered_customers[filtered_customers["product_category_name"] == selected_category]
+
+if not filtered_customers.empty:
+    customer_distribution = filtered_customers.groupby("customer_zip_code_prefix").size().reset_index(name="customer_count")
+    top_10_zipcodes = customer_distribution.sort_values(by="customer_count", ascending=False).head(10)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.barplot(x=top_10_zipcodes["customer_zip_code_prefix"].astype(str), y=top_10_zipcodes["customer_count"], palette="coolwarm")
+    ax.set_title("Customer Distribution by Zip Code (Top 10)")
+    ax.set_xlabel("Zip Code")
+    ax.set_ylabel("Number of Customers")
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
+else:
+    st.warning("No customer data available for the selected filters.")
